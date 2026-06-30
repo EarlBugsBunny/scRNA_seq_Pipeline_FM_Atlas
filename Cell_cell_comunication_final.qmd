@@ -1,0 +1,579 @@
+---
+title: "Differences in Cell Population Midterm vs. Term"
+author: "Lukas Moser"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+format:
+  html:
+    self-contained: true
+---
+
+According to Vignette: 
+## Reading the file
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+# Load Seurat library
+library(Seurat)
+library(SingleCellExperiment)
+library(dplyr)
+library(ggplot2)
+library(nichenetr)
+library(multinichenetr)
+
+# Read the RDS file
+amnion_seurat_object <- readRDS(file = "amnion_seurat_object.rds")
+
+```
+
+```{r}
+counts <- GetAssayData(amnion_seurat_object[["RNA"]], slot = "counts")
+metadata <- amnion_seurat_object@meta.data
+
+# -------------------------
+# 2) Build new Seurat object
+# -------------------------
+obj <- CreateSeuratObject(
+  counts = counts,
+  meta.data = metadata,
+  assay = "RNA",
+  project = "Amnion_Rebuild"
+)
+
+# -------------------------
+# 3) Preprocessing
+# -------------------------
+# Normalize
+obj <- NormalizeData(obj, normalization.method = "LogNormalize", scale.factor = 1e4)
+
+# Find variable features
+obj <- FindVariableFeatures(obj, selection.method = "vst", nfeatures = 2000)
+
+# Scale data
+obj <- ScaleData(obj, features = rownames(obj))
+
+# -------------------------
+# 4) PCA
+# -------------------------
+obj <- RunPCA(obj, features = VariableFeatures(obj), verbose = FALSE)
+
+# -------------------------
+# 5) Neighbors and Clustering
+# -------------------------
+obj <- FindNeighbors(obj, dims = 1:20)
+obj <- FindClusters(obj, resolution = 0.5)
+
+# -------------------------
+# 6) UMAP
+# -------------------------
+obj <- RunUMAP(obj, dims = 1:20)
+
+amnion_seurat_object <- obj
+
+rm(obj)
+rm(counts)
+
+gc()
+
+```
+
+
+```{r}
+amnion_no_graphs <- amnion_seurat_object
+amnion_no_graphs@graphs <- list()
+
+all_seurat_object_filtered <- subset(amnion_no_graphs, subset = timepoint %in% c("Week_25", "Week_38"))
+all_seurat_object_filtered <- subset(all_seurat_object_filtered, subset = tissue_source %in% c("Peripher"))
+all_seurat_object_filtered$samples <- paste(
+  all_seurat_object_filtered$timepoint,
+  all_seurat_object_filtered$Donor_Nr,
+  sep = "_")
+Idents(all_seurat_object_filtered) <- "samples"
+int_seurat_object <- NormalizeData(all_seurat_object_filtered)
+int_seurat_object <- FindVariableFeatures(int_seurat_object, selection.method = "vst", nfeatures = 50000)
+int_seurat_object <- ScaleData(int_seurat_object)
+
+```
+
+```{r}
+rm(amnion_no_graphs)
+rm(amnion_seurat_object)
+rm(all_seurat_object_filtered)
+gc()
+# Access metadata
+metadata <- int_seurat_object@meta.data
+
+# Create the group_time column based on the existing group column
+metadata$group_time <- metadata$timepoint
+# Update the metadata in the Seurat object
+int_seurat_object@meta.data <- metadata
+gc()
+```
+
+```{r}
+# Access metadata
+metadata <- int_seurat_object@meta.data
+
+# Replace spaces, plus signs, and hyphens with underscores in the cell_type column
+metadata$cell_type <- gsub("[ +\\-]", "_", metadata$cell_type)
+metadata$samples <- gsub("[ +\\-]", "_", metadata$samples)
+
+
+# Update the metadata in the Seurat object
+int_seurat_object@meta.data <- metadata
+
+# Verify the changes
+head(int_seurat_object@meta.data$cell_type)
+
+print(unique(int_seurat_object$cell_type))
+
+```
+
+
+
+# Load NicheNet's ligand-receptor network and ligand-target matrix
+
+```{r}
+organism = "human"
+
+options(timeout = 120)
+
+
+
+if(organism == "human"){
+  
+  lr_network_all = 
+    readRDS("lr_network_human_allInfo_30112033.rds") %>% 
+    mutate(
+      ligand = convert_alias_to_symbols(ligand, organism = organism), 
+      receptor = convert_alias_to_symbols(receptor, organism = organism))
+  
+  lr_network_all = lr_network_all  %>% 
+    mutate(ligand = make.names(ligand), receptor = make.names(receptor)) 
+  
+  lr_network = lr_network_all %>% 
+    distinct(ligand, receptor)
+  
+  ligand_target_matrix = readRDS("ligand_target_matrix_nsga2r_final.rds")
+  
+  colnames(ligand_target_matrix) = colnames(ligand_target_matrix) %>% 
+    convert_alias_to_symbols(organism = organism) %>% make.names()
+  rownames(ligand_target_matrix) = rownames(ligand_target_matrix) %>% 
+    convert_alias_to_symbols(organism = organism) %>% make.names()
+  
+  lr_network = lr_network %>% filter(ligand %in% colnames(ligand_target_matrix))
+  ligand_target_matrix = ligand_target_matrix[, lr_network$ligand %>% unique()]
+  
+} else if(organism == "mouse"){
+  
+  lr_network_all = readRDS(url(
+    "https://zenodo.org/record/10229222/files/lr_network_mouse_allInfo_30112033.rds"
+    )) %>% 
+    mutate(
+      ligand = convert_alias_to_symbols(ligand, organism = organism), 
+      receptor = convert_alias_to_symbols(receptor, organism = organism))
+  
+  lr_network_all = lr_network_all  %>% 
+    mutate(ligand = make.names(ligand), receptor = make.names(receptor)) 
+  lr_network = lr_network_all %>% 
+    distinct(ligand, receptor)
+  
+  ligand_target_matrix = readRDS(url(
+    "https://zenodo.org/record/7074291/files/ligand_target_matrix_nsga2r_final_mouse.rds"
+    ))
+  
+  colnames(ligand_target_matrix) = colnames(ligand_target_matrix) %>% 
+    convert_alias_to_symbols(organism = organism) %>% make.names()
+  rownames(ligand_target_matrix) = rownames(ligand_target_matrix) %>% 
+    convert_alias_to_symbols(organism = organism) %>% make.names()
+  
+  lr_network = lr_network %>% filter(ligand %in% colnames(ligand_target_matrix))
+  ligand_target_matrix = ligand_target_matrix[, lr_network$ligand %>% unique()]
+  
+}
+
+```
+# Read in SingleCellExperiment Object
+
+```{r}
+sce = Seurat::as.SingleCellExperiment(int_seurat_object, assay = "RNA")
+sce = alias_to_symbol_SCE(sce, "human") %>% makenames_SCE()
+
+```
+
+# Prepare the settings of the MultiNicheNet cell-cell communication analysis
+
+
+## Define in which metadata columns we can find the group, sample and cell type IDs
+```{r}
+cell_metadata <- as.data.frame(colData(sce))
+
+sample_id = "samples"
+group_id = "timepoint"
+celltype_id = "cell_type"
+covariates = NA
+batches = NA
+```
+
+## Define the contrasts of interest.
+```{r}
+# Just one contrast: Week_25 vs Week_38
+contrasts_oi <- c("'Week_38-Week_25'")
+
+contrast_tbl <- tibble(
+  contrast = c("Week_38-Week_25"),
+  group    = c("Week_25","Week_38")  # optional, or could label each explicitly
+)
+```
+
+#Define the sender and receiver cell types of interest.
+
+```{r}
+senders_oi = SummarizedExperiment::colData(sce)[,celltype_id] %>% unique()
+receivers_oi = SummarizedExperiment::colData(sce)[,celltype_id] %>% unique()
+sce = sce[, SummarizedExperiment::colData(sce)[,celltype_id] %in% 
+            c(senders_oi, receivers_oi)
+          ]
+
+
+```
+
+# Cell-type filtering: determine which cell types are sufficiently present
+```{r}
+min_cells = 10
+
+abundance_info = get_abundance_info(
+  sce = sce, 
+  sample_id = sample_id, group_id = group_id, celltype_id = celltype_id, 
+  min_cells = min_cells, 
+  )
+gc()
+```
+
+```{r}
+abundance_info$abund_plot_sample
+
+```
+
+# Cell type filtering based on cell type abundance information
+
+```{r}
+sample_group_celltype_df = abundance_info$abundance_data %>% 
+  filter(n > min_cells) %>% 
+  ungroup() %>% 
+  distinct(sample_id, group_id) %>% 
+  cross_join(
+    abundance_info$abundance_data %>% 
+      ungroup() %>% 
+      distinct(celltype_id)
+    ) %>% 
+  arrange(sample_id)
+
+abundance_df = sample_group_celltype_df %>% left_join(
+  abundance_info$abundance_data %>% ungroup()
+  )
+
+abundance_df$n[is.na(abundance_df$n)] = 0
+abundance_df$keep[is.na(abundance_df$keep)] = FALSE
+abundance_df_summarized = abundance_df %>% 
+  mutate(keep = as.logical(keep)) %>% 
+  group_by(group_id, celltype_id) %>% 
+  summarise(samples_present = sum((keep)))
+
+celltypes_absent_one_condition = abundance_df_summarized %>% 
+  filter(samples_present == 0) %>% pull(celltype_id) %>% unique() 
+# find truly condition-specific cell types by searching for cell types 
+# truely absent in at least one condition
+
+celltypes_present_one_condition = abundance_df_summarized %>% 
+  filter(samples_present >= 2) %>% pull(celltype_id) %>% unique() 
+# require presence in at least 2 samples of one group so 
+# it is really present in at least one condition
+
+condition_specific_celltypes = intersect(
+  celltypes_absent_one_condition, 
+  celltypes_present_one_condition)
+
+total_nr_conditions = SummarizedExperiment::colData(sce)[,group_id] %>% 
+  unique() %>% length() 
+
+
+absent_celltypes <- abundance_df_summarized %>%
+  filter(samples_present < 2) %>%                # Keep rows where 'samples_present' is less than 2
+  group_by(celltype_id) %>%                      # Group by 'celltype_id'
+  summarize(n_conditions = n_distinct(group_id)) %>% # Count unique conditions per 'celltype_id'
+  filter(n_conditions == total_nr_conditions) %>%    # Filter where count matches total conditions
+  pull(celltype_id)    
+  
+print("condition-specific celltypes:")
+## [1] "condition-specific celltypes:"
+print(condition_specific_celltypes)
+## character(0)
+  
+print("absent celltypes:")
+## [1] "absent celltypes:"
+print(absent_celltypes)
+## character(0)
+```
+
+```{r}
+analyse_condition_specific_celltypes = FALSE
+
+if(analyse_condition_specific_celltypes == TRUE){
+  senders_oi = senders_oi %>% setdiff(absent_celltypes)
+  receivers_oi = receivers_oi %>% setdiff(absent_celltypes)
+} else {
+  senders_oi = senders_oi %>% 
+    setdiff(union(absent_celltypes, condition_specific_celltypes))
+  receivers_oi = receivers_oi %>% 
+    setdiff(union(absent_celltypes, condition_specific_celltypes))
+}
+
+sce = sce[, SummarizedExperiment::colData(sce)[,celltype_id] %in% 
+            c(senders_oi, receivers_oi)
+          ]
+gc()
+```
+
+# Gene filtering: determine which genes are sufficiently expressed in each present cell type
+```{r}
+min_sample_prop = 0.50
+fraction_cutoff = 0.05
+
+frq_list = get_frac_exprs(
+  sce = sce, 
+  sample_id = sample_id, celltype_id =  celltype_id, group_id = group_id, 
+  batches = batches, 
+  min_cells = min_cells, 
+  fraction_cutoff = fraction_cutoff, min_sample_prop = min_sample_prop)
+
+```
+
+
+```{r}
+genes_oi = frq_list$expressed_df %>% 
+  filter(expressed == TRUE) %>% pull(gene) %>% unique() 
+sce = sce[genes_oi, ]
+gc()
+```
+
+
+# Pseudobulk expression calculation: determine and normalize per-sample pseudobulk expression levels for each expressed gene in each present cell type
+
+
+```{r}
+abundance_expression_info = process_abundance_expression_info(
+  sce = sce, 
+  sample_id = sample_id, group_id = group_id, celltype_id = celltype_id, 
+  min_cells = min_cells, 
+  senders_oi = senders_oi, receivers_oi = receivers_oi, 
+  lr_network = lr_network, 
+  batches = batches, 
+  frq_list = frq_list, 
+  abundance_info = abundance_info)
+```
+
+```{r}
+gc()
+```
+
+```{r}
+abundance_expression_info$celltype_info$pb_df %>% head()
+abundance_expression_info$celltype_info$pb_df_group %>% head()
+abundance_expression_info$sender_receiver_info$pb_df %>% head()
+```
+
+
+# Differential expression (DE) analysis: determine which genes are differentially expressed
+```{r}
+DE_info = get_DE_info(
+  sce = sce, 
+  sample_id = sample_id, group_id = group_id, celltype_id = celltype_id, 
+  batches = batches, covariates = covariates, 
+  contrasts_oi = contrasts_oi, 
+  min_cells = min_cells, 
+  expressed_df = frq_list$expressed_df)
+
+```
+
+```{r}
+DE_info$hist_pvals
+```
+```{r}
+empirical_pval = FALSE
+
+if(empirical_pval == TRUE){
+  DE_info_emp = get_empirical_pvals(DE_info$celltype_de$de_output_tidy)
+  celltype_de = DE_info_emp$de_output_tidy_emp %>% select(-p_val, -p_adj) %>% 
+    rename(p_val = p_emp, p_adj = p_adj_emp)
+} else {
+  celltype_de = DE_info$celltype_de$de_output_tidy
+} 
+
+
+```
+
+# Combine DE information for ligand-senders and receptors-receivers
+```{r}
+sender_receiver_de = combine_sender_receiver_de(
+  sender_de = celltype_de,
+  receiver_de = celltype_de,
+  senders_oi = senders_oi,
+  receivers_oi = receivers_oi,
+  lr_network = lr_network
+)
+```
+ 
+# Combine DE information for ligand-senders and receptors-receivers
+```{r}
+sender_receiver_de = combine_sender_receiver_de(
+  sender_de = celltype_de,
+  receiver_de = celltype_de,
+  senders_oi = senders_oi,
+  receivers_oi = receivers_oi,
+  lr_network = lr_network
+)
+```
+
+```{r}
+sender_receiver_de %>% head(20)
+```
+# Ligand activity prediction: use the DE analysis output to predict the activity of ligands in receiver cell types and infer their potential target genes
+
+## Assess geneset_oi-vs-background ratios for different DE output tresholds prior to the NicheNet ligand activity analysis
+
+```{r}
+logFC_threshold = 0.5
+p_val_threshold = 0.05
+```
+##
+```{r}
+p_val_adj = TRUE
+geneset_assessment = contrast_tbl$contrast %>% 
+  lapply(
+    process_geneset_data, 
+    celltype_de, logFC_threshold, p_val_adj, p_val_threshold
+  ) %>% 
+  bind_rows()
+geneset_assessment
+```
+Use the adjusted p-value
+```{r}
+geneset_assessment_adjustedPval = contrast_tbl$contrast %>% 
+  lapply(
+    process_geneset_data, 
+    celltype_de, logFC_threshold, p_val_adj = TRUE, p_val_threshold
+    ) %>% 
+  bind_rows() 
+geneset_assessment_adjustedPval
+```
+## Perform the ligand activity analysis and ligand-target inference
+```{r}
+top_n_target = 250
+```
+
+```{r}
+verbose = TRUE
+cores_system = 7
+n.cores = min(cores_system, celltype_de$cluster_id %>% unique() %>% length()) 
+```
+
+```{r}
+rm(seurat_object)
+rm(int_seurat_object)
+rm(frq_list)
+gc()
+```
+
+```{r}
+ligand_activities_targets_DEgenes = suppressMessages(suppressWarnings(
+  get_ligand_activities_targets_DEgenes(
+    receiver_de = celltype_de,
+    receivers_oi = intersect(receivers_oi, celltype_de$cluster_id %>% unique()),
+    ligand_target_matrix = ligand_target_matrix,
+    logFC_threshold = logFC_threshold,
+    p_val_threshold = p_val_threshold,
+    p_val_adj = p_val_adj,
+    top_n_target = top_n_target,
+    verbose = verbose, 
+    n.cores = n.cores
+  )
+))
+```
+
+```{r}
+ligand_activities_targets_DEgenes$ligand_activities %>% head(20)
+```
+# Prioritization: rank cell-cell communication patterns through multi-criteria prioritization
+```{r}
+ligand_activity_down = FALSE
+```
+
+```{r}
+sender_receiver_tbl = sender_receiver_de %>% distinct(sender, receiver)
+
+metadata_combined = SummarizedExperiment::colData(sce) %>% tibble::as_tibble()
+
+if(!is.na(batches)){
+  grouping_tbl = metadata_combined[,c(sample_id, group_id, batches)] %>% 
+    tibble::as_tibble() %>% distinct()
+  colnames(grouping_tbl) = c("sample","group",batches)
+} else {
+  grouping_tbl = metadata_combined[,c(sample_id, group_id)] %>% 
+    tibble::as_tibble() %>% distinct()
+  colnames(grouping_tbl) = c("sample","group")
+}
+
+prioritization_tables = suppressMessages(generate_prioritization_tables(
+    sender_receiver_info = abundance_expression_info$sender_receiver_info,
+    sender_receiver_de = sender_receiver_de,
+    ligand_activities_targets_DEgenes = ligand_activities_targets_DEgenes,
+    contrast_tbl = contrast_tbl,
+    sender_receiver_tbl = sender_receiver_tbl,
+    grouping_tbl = grouping_tbl,
+    scenario = "regular", # all prioritization criteria will be weighted equally
+    fraction_cutoff = fraction_cutoff, 
+    abundance_data_receiver = abundance_expression_info$abundance_data_receiver,
+    abundance_data_sender = abundance_expression_info$abundance_data_sender,
+    ligand_activity_down = ligand_activity_down
+  ))
+```
+
+# Calculate the across-samples expression correlation between ligand-receptor pairs and target genes 
+```{r}
+lr_target_prior_cor = lr_target_prior_cor_inference(
+  receivers_oi = prioritization_tables$group_prioritization_tbl$receiver %>% unique(), 
+  abundance_expression_info = abundance_expression_info, 
+  celltype_de = celltype_de, 
+  grouping_tbl = grouping_tbl, 
+  prioritization_tables = prioritization_tables, 
+  ligand_target_matrix = ligand_target_matrix, 
+  logFC_threshold = logFC_threshold, 
+  p_val_threshold = p_val_threshold, 
+  p_val_adj = p_val_adj
+  )
+
+```
+
+# Save all the output of MultiNicheNet
+```{r}
+path = "./"
+
+multinichenet_output = list(
+    celltype_info = abundance_expression_info$celltype_info,
+    celltype_de = celltype_de,
+    sender_receiver_info = abundance_expression_info$sender_receiver_info,
+    sender_receiver_de =  sender_receiver_de,
+    ligand_activities_targets_DEgenes = ligand_activities_targets_DEgenes,
+    prioritization_tables = prioritization_tables,
+    grouping_tbl = grouping_tbl,
+    lr_target_prior_cor = lr_target_prior_cor
+  ) 
+multinichenet_output = make_lite_output(multinichenet_output)
+
+save = TRUE
+if(save == TRUE){
+  saveRDS(multinichenet_output, paste0(path, "all_samples_multinichenet_output_v3.rds"))
+
+}
+```
+
+

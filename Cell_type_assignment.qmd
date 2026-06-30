@@ -1,0 +1,789 @@
+---
+title: "scRNA of in vitro human skeletal stem cells"
+author: "Lukas Moser"
+date: today
+date-format: long
+format:
+  html:
+    toc: true
+    self-contained: true
+---
+
+## Importing file from Trailmaker and do Datacleaning
+```{r,include=FALSE}
+set.seed(123)
+#Read the input
+library(openxlsx)
+library(Seurat)
+library(ggplot2)
+library(cowplot)
+library(dplyr)
+library("Seurat")
+library("limma")
+library("clustree")
+library("viridis")
+library("glue")
+library("knitr")
+library("BiocParallel")
+library("here")
+library("writexl")
+library("jsonlite")
+library("tidyverse")
+seurat_object <- readRDS("6be4e6e0-90bc-49ae-91ca-7a428ec7365c_processed_matrix.rds")
+```
+
+### Create a new Seurat object
+
+```{r}
+old_seurat_obj <- seurat_object
+
+old_seurat_obj@assays$RNA@counts@Dimnames[[1]] <- old_seurat_obj@misc$gene_annotations$original_name
+
+# Step 1: Extract counts data
+counts_matrix <- old_seurat_obj[["RNA"]]@counts
+# Step 2: Extract cell metadata
+cell_metadata <- old_seurat_obj@meta.data
+# Step 3: Create a new Seurat object
+new_seurat_obj <- CreateSeuratObject(counts = counts_matrix, meta.data = cell_metadata)
+
+old_seurat_obj <- seurat_object
+seurat_object <- new_seurat_obj
+rm(new_seurat_obj)
+rm(old_seurat_obj)
+rm(counts_matrix)
+```
+
+### QC with Mitochondria genes and doublets
+```{r}
+metadata <- seurat_object [[]]
+metadata_first_10 <- head(seurat_object@meta.data, 10)
+```
+
+```{r}
+library(dplyr)
+
+# Create a summary table grouped by sample
+sample_summary <- seurat_object@meta.data %>%
+  group_by(samples) %>%
+  summarise(
+    Total_Cells = n(),
+    Singlet_Cells = sum(doublet_class == "singlet", na.rm = TRUE),
+    Percent_Singlet = (Singlet_Cells / Total_Cells) * 100
+  )
+
+# Display the summary
+print(sample_summary)
+```
+
+
+```{r}
+# Visualize the percent.mt and doublet_score columns as histograms
+ggplot(seurat_object@meta.data, aes(x = percent.mt)) +
+  geom_histogram(binwidth = 0.01, fill = 'blue', alpha = 0.7) +
+  ggtitle('Histogram of percent.mt') +
+  xlab('percent.mt') +
+  ylab('Frequency')
+
+ggplot(seurat_object@meta.data, aes(x = doublet_scores)) +
+  geom_histogram(binwidth = 0.01, fill = 'red', alpha = 0.7) +
+  ggtitle('Histogram of doublet_score') +
+  xlab('doublet_score') +
+  ylab('Frequency')
+
+# Filter cells with percent.mt > 0.5 or doublet_score > 0.5
+filtered_seurat_object <- subset(seurat_object, subset = percent.mt <= 1 & doublet_class <= "singlet")
+
+# Calculate the number of cells removed
+num_cells_removed <- ncol(seurat_object) - ncol(filtered_seurat_object)
+
+# Print the number of cells removed
+print(paste("Number of cells removed:", num_cells_removed))
+
+# Return the filtered Seurat object
+filtered_seurat_object
+seurat_object <- filtered_seurat_object
+```
+### Normalize Data and find Variables Gene
+```{r}
+seurat_object <- NormalizeData(seurat_object, normalization.method = "LogNormalize", scale.factor = 10000)
+seurat_object <- FindVariableFeatures(seurat_object, selection.method = "vst", nfeatures = 2000)
+top10 <- head(VariableFeatures(seurat_object), 10)
+```
+
+### Run PCA and UMAP
+```{r}
+#invisible(ulimit::memory_limit(18000))
+#I use here only the varibale feature instead of all, otherwise I run into memory issues
+seurat_object <- ScaleData(seurat_object)
+seurat_object <- RunPCA(seurat_object, features = VariableFeatures(object = seurat_object))
+
+```
+```{r}
+DimHeatmap(seurat_object, dims = 1:20, cells = 500, balanced = TRUE)
+ElbowPlot(seurat_object)
+```
+```{r}
+seurat_object <- RunUMAP(seurat_object, dims = 1:15)
+```
+### Make Sample Groups
+`````{r}
+
+# Extract the metadata
+
+metadata <- seurat_object@meta.data
+
+# Create a new column by removing the last underscore and the number afterwards
+metadata$group <- sub("_[^_]+$", "", metadata$samples)
+
+# Assign the updated metadata back to the Seurat object
+seurat_object@meta.data <- metadata
+
+# Verify the changes
+head(metadata)
+
+# Optional: Print unique groups to check
+unique_groups <- unique(metadata$group)
+print(unique_groups)
+```
+
+
+```{r}
+# Load necessary library
+library(dplyr)
+
+# Extract the metadata
+metadata <- seurat_object@meta.data
+
+# Create a summary table for the number of cells in each group
+group_summary <- metadata %>%
+  dplyr::group_by(group) %>%
+  dplyr::summarize(total_cells = n()) %>%
+  dplyr::arrange(desc(total_cells))
+
+# Print the summary table for groups
+print("Group summary:")
+print(group_summary)
+
+# Create a summary table for the number of cells in each sample within each group
+sample_summary <- metadata %>%
+  dplyr::group_by(group, samples) %>%
+  dplyr::summarize(total_cells = n()) %>%
+  dplyr::arrange(group, desc(total_cells))
+
+# Print the summary table for samples within each group
+print("Sample summary:")
+print(sample_summary)
+
+```
+
+### Check UMAP
+```{r}
+Idents(seurat_object) <- "group"
+DimPlot(seurat_object, reduction = "umap")
+```
+
+```{r}
+#test <- seurat_object@misc$gene_annotations
+gc()
+```
+# Assign Celltype
+
+
+### Remove cultured cells (for another project used)
+```{r}
+# Define the groups to keep
+groups_to_keep <- c("Preterm_Amnion", "Term_Amnion", "MMC_Amnion", "Placenta_Amnion",
+                    "Preterm_Chorion", "Term_Chorion", "MMC_Chorion", "Placenta_Chorion")
+# Extract the metadata
+metadata <- seurat_object@meta.data
+# Filter the metadata to keep only the cells in the specified groups
+cells_to_keep <- rownames(metadata[metadata$group %in% groups_to_keep, ])
+# Subset the Seurat object to keep only the selected cells
+amnion_seurat_object <- subset(seurat_object, cells = cells_to_keep)
+
+#rm(seurat_object)
+gc()
+```
+### Preprocess Data
+
+```{r}
+amnion_seurat_object <- NormalizeData(amnion_seurat_object, normalization.method = "LogNormalize", scale.factor = 10000)
+amnion_seurat_object <- FindVariableFeatures(amnion_seurat_object, selection.method = "vst", nfeatures = 3000)
+#Again just run the the most varibale to scale the data
+amnion_seurat_object <- ScaleData(amnion_seurat_object)
+
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+amnion_seurat_object <- CellCycleScoring(amnion_seurat_object, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE)
+# all.genes <- rownames(amnion_seurat_object)
+# amnion_seurat_object <- ScaleData(amnion_seurat_object, features = all.genes)
+amnion_seurat_object <- RunPCA(amnion_seurat_object, features = VariableFeatures(object = amnion_seurat_object))
+
+gc()
+#amnion_seurat_object<- RunPCA(amnion_seurat_object, features = VariableFeatures(object = amnion_seurat_object))
+#VizDimLoadings(amnion_seurat_object, dims = 1:2, reduction = "pca")
+DimHeatmap(amnion_seurat_object, dims = 1:21, cells = 500, balanced = TRUE)
+ElbowPlot(amnion_seurat_object)
+
+
+amnion_seurat_object <- RunTSNE(amnion_seurat_object, dims = 1:20)
+amnion_seurat_object <- RunUMAP(amnion_seurat_object, dims = 1:20)
+Idents(amnion_seurat_object) <- "group"
+DimPlot(amnion_seurat_object, reduction = "umap")
+
+```
+
+###Clustering
+
+#### Clustering Algortihm
+```{r}
+metadata <- amnion_seurat_object@meta.data
+n.dims <- 20
+resolutions <- seq(0.2, 1.8, 0.2)
+amnion_seurat_object <- FindNeighbors(amnion_seurat_object, dims = 1:20)
+amnion_seurat_object <- FindClusters(amnion_seurat_object, reduction.type = "cca.aligned",
+                         dims.use = 1:n.dims, resolution = resolutions)
+metadata <- amnion_seurat_object@meta.data
+
+```
+
+
+#### Umap of the Clustering
+```{r}
+# Define the resolutions
+#resolutions <- c(0.6, 0.8, 1.0, 1.2, 1.4)
+
+# Initialize lists to store UMAP, t-SNE plots and top markers for each resolution
+umap_plots <- list()
+tsne_plots <- list()
+  
+# Loop through each resolution
+for (res in resolutions) {
+  # Set the identity of the Seurat object to the respective resolution
+  Idents(amnion_seurat_object) <- paste0("RNA_snn_res.", res)
+  
+  
+  # Generate UMAP and t-SNE plots
+  umap_plot <- DimPlot(amnion_seurat_object, reduction = "umap", group.by = paste0("RNA_snn_res.", res)) + ggtitle(paste("UMAP - Res:", res))
+  tsne_plot <- DimPlot(amnion_seurat_object, reduction = "tsne", group.by = paste0("RNA_snn_res.", res)) + ggtitle(paste("t-SNE - Res:", res))
+  
+  # Save plots to lists
+  umap_plots[[paste0("res_", res)]] <- umap_plot
+  tsne_plots[[paste0("res_", res)]] <- tsne_plot
+  
+}
+
+# Combine UMAP and t-SNE plots for each resolution
+combined_plots <- list()
+for (res in resolutions) {
+  combined_plot <- umap_plots[[paste0("res_", res)]] | tsne_plots[[paste0("res_", res)]]
+  combined_plots[[paste0("res_", res)]] <- combined_plot
+  print(combined_plot)
+}
+```
+#### Clustertree
+```{r}
+#From here, other interesting plots also here: http://oshlacklab.com/combes-organoid-paper/07_Combined_Clustering.html#
+clustree(amnion_seurat_object)
+```
+
+```{r}
+clustree(amnion_seurat_object, node_colour = "sc3_stability")
+```
+
+
+# Assign Celltype according to Pique-Regi
+
+
+#### Based on Pique-Regi Paper with  scType
+
+```{r}
+library(HGNChelper)
+library(openxlsx)
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R"); source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+# load gene set preparation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/gene_sets_prepare.R")
+# load cell type annotation function
+source("https://raw.githubusercontent.com/IanevskiAleksandr/sc-type/master/R/sctype_score_.R")
+```
+
+```{r}
+# Load necessary libraries
+library(readxl)
+library(dplyr)
+library(writexl)
+
+# File and gene setup
+marker_file <- "Pique_et_all_2019_markergenes.xls"
+tissue_type <- "amnion"
+synaptic_neuron_gene <- ""  # Replace with the actual gene name you want
+
+# Read the Excel file
+markers_df <- read_excel(marker_file)
+
+# Summarize the DataFrame
+final_df <- markers_df %>%
+  group_by(cluster) %>%
+  summarise(
+    geneSymbolmore1 = paste(gene, collapse = ", "),
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    tissueType = tissue_type,
+    cellName = cluster,
+    geneSymbolmore2 = synaptic_neuron_gene  # Set specific gene for synaptic neurons
+  ) %>%
+  dplyr::select(tissueType, cellName, geneSymbolmore1, geneSymbolmore2)
+
+# Write to an Excel file
+output_file <- "gs.xlsx"
+write_xlsx(final_df, path = output_file)
+
+# Call the gene_sets_prepare function (make sure it's loaded or available)
+gs_list <- gene_sets_prepare(output_file, tissue_type)
+
+
+```
+
+
+
+```{r}
+
+# check Seurat object version (scRNA-seq matrix extracted differently in Seurat v4/v5)
+seurat_package_v5 <- isFALSE('counts' %in% names(attributes(amnion_seurat_object[["RNA"]])));
+print(sprintf("Seurat object %s is used", ifelse(seurat_package_v5, "v5", "v4")))
+
+# extract scaled scRNA-seq matrix
+scRNAseqData_scaled <- if (seurat_package_v5) as.matrix(amnion_seurat_object[["RNA"]]$scale.data) else as.matrix(amnion_seurat_object[["RNA"]]@scale.data)
+
+# run ScType
+es.max <- sctype_score(scRNAseqData = scRNAseqData_scaled, scaled = TRUE, gs = gs_list$gs_positive, gs2 = gs_list$gs_negative)
+
+# NOTE: scRNAseqData parameter should correspond to your input scRNA-seq matrix. For raw (unscaled) count matrix set scaled = FALSE
+# When using Seurat, we use "RNA" slot with 'scale.data' by default. Please change "RNA" to "SCT" for sctransform-normalized data,
+# or to "integrated" for joint dataset analysis. To apply sctype with unscaled data, use e.g. amnion_seurat_object[["RNA"]]$counts or amnion_seurat_object[["RNA"]]@counts, with scaled set to FALSE.
+
+# merge by cluster
+cL_resutls <- do.call("rbind", lapply(unique(amnion_seurat_object@meta.data$RNA_snn_res.1), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(amnion_seurat_object@meta.data[amnion_seurat_object@meta.data$RNA_snn_res.1==cl, ])]), decreasing = !0)
+    head(data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(amnion_seurat_object@meta.data$RNA_snn_res.1==cl)), 10)
+}))
+sctype_scores <- cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)  
+
+# set low-confident (low ScType score) clusters to "unknown"
+sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < sctype_scores$ncells/4] <- "Unknown"
+print(sctype_scores[,1:3])
+
+```
+```{r}
+Idents(amnion_seurat_object) <- "RNA_snn_res.1"
+
+# Initialize a new metadata column for cell types
+amnion_seurat_object$scType_Pique <- NA
+
+# Loop through each cluster in sctype_scores and assign the corresponding type
+for (i in 1:nrow(sctype_scores)) {
+  cluster_id <- as.character(sctype_scores$cluster[i])
+  cell_type <- sctype_scores$type[i]
+  
+  # Get cells belonging to the current cluster
+  cells_in_cluster <- WhichCells(amnion_seurat_object, idents = cluster_id)
+  
+  # Assign the cell type to these cells
+  amnion_seurat_object$scType_Pique[cells_in_cluster] <- cell_type
+}
+
+```
+
+
+
+```{r}
+DimPlot(amnion_seurat_object, reduction = "umap", group.by = "scType_Pique", label = TRUE,
+  label.size = 3)+ NoLegend()
+DimPlot(amnion_seurat_object, reduction = "tsne", group.by = "scType_Pique", label = TRUE,
+  label.size = 3)+ NoLegend()
+
+```
+
+#### Make the unkown cluster to epithelial cells
+
+```{r}
+# Change all 'Unknown' entries in the 'scType_Pique' column to 'Epithelial'
+amnion_seurat_object$scType_Pique[amnion_seurat_object$scType_Pique == "Unknown"] <- "Epithelial"
+DimPlot(amnion_seurat_object, reduction = "umap", group.by = "scType_Pique", label = TRUE,
+  label.size = 3)+ NoLegend()
+```
+# Find the origin
+
+# Classify Sex of cells
+```{r}
+library(speckle)
+library(SingleCellExperiment)
+library(cellXY)
+library(CellBench)
+library(org.Hs.eg.db)
+
+# Get the total number of cells in your Seurat object
+total_cells <- ncol(amnion_seurat_object)
+
+# Split cells into three groups
+group1 <- sample(colnames(amnion_seurat_object), size = floor(total_cells / 3))
+remaining_cells <- setdiff(colnames(amnion_seurat_object), group1)
+group2 <- sample(remaining_cells, size = floor(total_cells / 3))
+group3 <- setdiff(remaining_cells, group2)
+
+# Function to classify sex for a subset of cells
+classify_group_sex <- function(cells_subset) {
+    # Subset the Seurat object
+    seurat_subset <- subset(amnion_seurat_object, cells = cells_subset)
+    
+    # Extract the counts matrix
+    counts_matrix <- GetAssayData(seurat_subset, layer = "counts", assay = "RNA")
+    
+    # Run classifySex
+    sex <- classifySex(counts_matrix, genome = "Hs")
+    
+    return(sex)
+}
+
+# Run classifySex for each group
+sex_group1 <- classify_group_sex(group1)
+sex_group2 <- classify_group_sex(group2)
+sex_group3 <- classify_group_sex(group3)
+
+# Combine sex_group1 and sex_group2 by rows
+combined_sex <- rbind(sex_group1, sex_group2)
+
+# Now append sex_group3 to the combined data frame
+combined_sex <- rbind(combined_sex, sex_group3)
+
+metadata <- amnion_seurat_object@meta.data
+
+rownames(metadata) <- rownames(metadata)
+rownames(combined_sex) <- rownames(combined_sex)
+
+combined_data <- merge(metadata, combined_sex, by = "row.names", all = TRUE)
+
+rownames(combined_data) <- combined_data$Row.names
+combined_data$Row.names <- NULL
+
+amnion_seurat_object@meta.data <- combined_data
+```
+
+```{r}
+# Your donor mapping
+donor_df <- data.frame(
+  samples = c(
+    "Term_Amnion_1", "Term_Amnion_2", "Term_Amnion_3", "Term_Amnion_4", "Term_Amnion_5",
+    "Term_Chorion_1", "Term_Chorion_2", "Term_Chorion_3", "Term_Chorion_4", "Term_Chorion_5",
+    "Preterm_Amnion_1", "Preterm_Amnion_2", "Preterm_Amnion_3", "Preterm_Amnion_4",
+    "Preterm_Chorion_1", "Preterm_Chorion_2", "Preterm_Chorion_3", "Preterm_Chorion_4",
+    "MMC_Amnion_1000", "MMC_Amnion_1001", "MMC_Amnion_1002", "MMC_Amnion_1003", "MMC_Amnion_1004", "MMC_Amnion_1005",
+    "MMC_Chorion_1000", "MMC_Chorion_1001", "MMC_Chorion_1002", "MMC_Chorion_1003", "MMC_Chorion_1004", "MMC_Chorion_1005",
+    "Placenta_Amnion_3","Placenta_Chorion_3","Placenta_Amnion_1","Placenta_Chorion_1","Placenta_Amnion_2","Placenta_Chorion_2"
+  ),
+  Donor_Nr = c(
+    51, 48, 45, 46, 49,
+    51, 48, 45, 46, 49,
+    53, 26, 41, 10,
+    53, 26, 41, 10,
+    1000, 1001, 1002, 1003, 1004, 1005,
+    1000, 1001, 1002, 1003, 1004, 1005,
+    51,51,45,45,46,46
+  ))
+
+# Create named vector: sample names as names, donor numbers as values
+donor_map <- setNames(donor_df$Donor_Nr, donor_df$samples)
+
+amnion_seurat_object@meta.data$Donor_Nr <- 1
+# Apply mapping directly to create a new Donor_Nr column in Seurat metadata
+amnion_seurat_object@meta.data$Donor_Nr <- donor_map[amnion_seurat_object@meta.data$samples]
+
+metadata <- amnion_seurat_object@meta.data
+```
+
+```{r}
+
+# 1. Create the folder if it doesn't exist
+output_dir <- "SI_Sexassignment"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+# 2. Define the groups and filter cells
+groups_to_keep <- c(45, 49, 26, 41, 10, 1005)
+metadata <- amnion_seurat_object@meta.data
+cells_to_keep <- rownames(metadata[metadata$Donor_Nr %in% groups_to_keep, ])
+
+# 3. Generate and save Plot 1: Prediction UMAP
+p1 <- DimPlot(amnion_seurat_object, reduction = "umap", cells = cells_to_keep, group.by = "prediction")
+ggsave(filename = file.path(output_dir, "umap_prediction.png"), plot = p1, width = 7, height = 6, dpi = 300)
+print(p1)
+
+# 4. Generate and save Plot 2: scType_Pique UMAP
+p2 <- DimPlot(amnion_seurat_object, reduction = "umap", cells = cells_to_keep, group.by = "scType_Pique", label = TRUE, label.size = 3) + NoLegend()
+ggsave(filename = file.path(output_dir, "umap_scType_Pique.png"), plot = p2, width = 7, height = 6, dpi = 300)
+print(p2)
+
+# 5. Generate and save Plot 3: XIST FeaturePlot
+p3 <- FeaturePlot(amnion_seurat_object, "XIST", reduction = "umap", cells = cells_to_keep)
+ggsave(filename = file.path(output_dir, "featureplot_XIST.png"), plot = p3, width = 7, height = 6, dpi = 300)
+print(p3)
+```
+
+```{r}
+male_fetus <- c(45,49,26,41,10,1005)
+amnion_no_graphs <- amnion_seurat_object
+amnion_no_graphs@graphs <- list()
+filtered_seurat_object <- subset(amnion_no_graphs, subset = Donor_Nr %in% male_fetus)
+metadata <- filtered_seurat_object@meta.data
+# Load required libraries
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+# Assuming metadata is already defined
+# Ensure `cell_type` and `scType_Pique` are characters
+metadata <- metadata %>%
+  mutate(cell_type = as.character(cell_type), 
+         scType_Pique = as.character(scType_Pique))
+
+# Calculate the ratio of male and female cells for each cluster
+ratio_df <- metadata %>%
+  filter(!is.na(prediction)) %>%
+  group_by(RNA_snn_res.1, prediction) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  pivot_wider(names_from = prediction, values_from = count, values_fill = 0) %>%
+  mutate(total = Male + Female,
+         Male_ratio = Male / total)
+
+# Get cluster information for titles
+cluster_info <- metadata %>%
+  group_by(RNA_snn_res.1) %>%
+  summarise(cell_type = unique(cell_type)[1],  # Get the first unique cell_type
+            scType_Pique = unique(scType_Pique)[1],  # Get the first unique scType_Pique
+            .groups = 'drop')
+
+# Join the ratio data with cluster info
+ratio_df <- ratio_df %>%
+  left_join(cluster_info, by = "RNA_snn_res.1")
+
+# Convert RNA_snn_res.1 to factor to maintain order
+ratio_df$RNA_snn_res.1 <- factor(ratio_df$RNA_snn_res.1, levels = unique(ratio_df$RNA_snn_res.1))
+
+# Plot 3: Total Number of Cells by scType_Pique
+ggplot(ratio_df, aes(x = RNA_snn_res.1, y = total, fill = "Total Cells")) +
+  geom_bar(stat = "identity", fill = "red") +
+  labs(x = "Clusters", 
+       y = "Total Cells", 
+       title = "Total Number of Cells by Cluster (scType_Pique)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) +
+  scale_x_discrete(labels = ratio_df$scType_Pique)
+
+# Plot 4: Male Ratio by scType_Pique
+ggplot(ratio_df, aes(x = RNA_snn_res.1, y = Male_ratio, fill = "Male Ratio")) +
+  geom_bar(stat = "identity", fill = "blue") +
+  labs(x = "Clusters", 
+       y = "Male Ratio", 
+       title = "Male Ratio by Cluster (scType_Pique)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) +
+  scale_x_discrete(labels = ratio_df$scType_Pique)
+
+amnion_ratio_df <- ratio_df
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(Seurat)
+
+# 1. Define output directory and ensure it exists
+output_dir <- "SI_Sexassignment"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+# 2. Data Subset & Preparation
+male_fetus <- c(45, 49, 26, 41, 10, 1005)
+amnion_no_graphs <- amnion_seurat_object
+amnion_no_graphs@graphs <- list()
+
+filtered_seurat_object <- subset(amnion_no_graphs, subset = Donor_Nr %in% male_fetus)
+metadata <- filtered_seurat_object@meta.data
+
+metadata <- metadata %>%
+  mutate(cell_type = as.character(cell_type), 
+         scType_Pique = as.character(scType_Pique))
+
+# Calculate ratios
+ratio_df <- metadata %>%
+  filter(!is.na(prediction)) %>%
+  group_by(RNA_snn_res.1, prediction) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  pivot_wider(names_from = prediction, values_from = count, values_fill = 0) %>%
+  mutate(total = Male + Female,
+         Male_ratio = Male / total)
+
+# Get cluster information
+cluster_info <- metadata %>%
+  group_by(RNA_snn_res.1) %>%
+  summarise(cell_type = unique(cell_type)[1], 
+            scType_Pique = unique(scType_Pique)[1], 
+            .groups = 'drop')
+
+ratio_df <- ratio_df %>% left_join(cluster_info, by = "RNA_snn_res.1")
+ratio_df$RNA_snn_res.1 <- factor(ratio_df$RNA_snn_res.1, levels = unique(ratio_df$RNA_snn_res.1))
+amnion_ratio_df <- ratio_df
+
+# ==================== GENERATING & SAVING PLOTS ====================
+
+# Plot A: Male Ratio by scType_Pique (Your original plot)
+p_ratio_pique <- ggplot(ratio_df, aes(x = RNA_snn_res.1, y = Male_ratio)) +
+  geom_bar(stat = "identity", fill = "blue") +
+  labs(x = "Cell Types (Pique)", 
+       y = "Male Ratio", 
+       title = "Male Ratio by Cluster (scType_Pique)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) +
+  scale_x_discrete(labels = ratio_df$scType_Pique)
+
+ggsave(filename = file.path(output_dir, "male_ratio_by_scType_Pique.png"), plot = p_ratio_pique, width = 8, height = 6, dpi = 300)
+
+
+# Plot B: Male Ratio by Cluster Number (X-axis changed to cluster numbers)
+p_ratio_cluster <- ggplot(ratio_df, aes(x = RNA_snn_res.1, y = Male_ratio)) +
+  geom_bar(stat = "identity", fill = "blue") +
+  labs(x = "Cluster ID", 
+       y = "Male Ratio", 
+       title = "Male Ratio by Cluster Number") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5)) # Kept flat since numbers are short
+
+ggsave(filename = file.path(output_dir, "male_ratio_by_cluster_number.png"), plot = p_ratio_cluster, width = 8, height = 6, dpi = 300)
+
+
+# Plot C: UMAP of Labeled Clusters (On the filtered subset)
+p_umap_clusters <- DimPlot(filtered_seurat_object, 
+                           reduction = "umap", 
+                           group.by = "RNA_snn_res.1", 
+                           label = TRUE, 
+                           label.size = 4) + 
+  labs(title = "UMAP of Filtered Subsets by Cluster ID") +
+  NoLegend()
+
+ggsave(filename = file.path(output_dir, "umap_filtered_clusters.png"), plot = p_umap_clusters, width = 7, height = 6, dpi = 300)
+
+```
+
+
+
+```{r}
+amnion_ratio_df$origin <- ifelse(amnion_ratio_df$Male_ratio > 0.70, "Fetus", "Mother")
+
+# Check that the cluster column in your Seurat metadata matches type with amnion_ratio_df
+amnion_ratio_df$RNA_snn_res.1 <- as.character(amnion_ratio_df$RNA_snn_res.1)
+amnion_seurat_object@meta.data$RNA_snn_res.1 <- as.character(amnion_seurat_object@meta.data$RNA_snn_res.1)
+
+# Create a lookup vector for origin by cluster
+origin_map <- setNames(amnion_ratio_df$origin, amnion_ratio_df$RNA_snn_res.1)
+
+# Map origin to each cell in metadata based on RNA_snn_res.1 cluster
+amnion_seurat_object@meta.data$origin <- origin_map[amnion_seurat_object@meta.data$RNA_snn_res.1]
+metadata <- amnion_seurat_object@meta.data
+```
+
+# Amnion or Chorion tissue
+
+```{r}
+amnion_seurat_object@meta.data$layer <- ifelse(grepl("Chorion", metadata$samples), "Chorion",
+                         ifelse(grepl("Amnion", metadata$samples), "Amnion", NA))
+
+amnion_seurat_object@meta.data <- amnion_seurat_object@meta.data %>%
+  mutate(
+    tissue_source = if_else(str_detect(samples, "Placenta"), "Placenta", "Peripher")
+  )
+
+metadata <- amnion_seurat_object@meta.data
+```
+
+# Which timepoint
+
+```{r}
+amnion_seurat_object@meta.data <- amnion_seurat_object@meta.data %>%
+  mutate(timepoint = case_when(
+    Donor_Nr %in% c(51, 48, 45, 46, 49) ~ "Week_38",
+    Donor_Nr == 53 ~ "Week_30",
+    Donor_Nr %in% c(26, 41, 10) ~ "Week_34",
+    Donor_Nr %in% c(1000, 1001, 1002, 1003, 1004, 1005) ~ "Week_25",
+    TRUE ~ NA_character_  # For anything else
+  ))
+
+
+amnion_seurat_object$gestational_timepoint <- ifelse(
+  amnion_seurat_object$timepoint == "Week_38", "Term",
+  ifelse(amnion_seurat_object$timepoint == "Week_25", "Midterm", "Preterm")
+)
+
+amnion_seurat_object@meta.data <- amnion_seurat_object@meta.data %>%
+  mutate(
+    timepoint_plus = ifelse(grepl("Placenta", samples),
+                            paste0(timepoint, "_Placenta"),
+                            timepoint),
+    gestational_timepoint_plus = ifelse(grepl("Placenta", samples),
+                                       paste0(gestational_timepoint, "_Placenta"),
+                                       gestational_timepoint)
+  )
+
+amnion_seurat_object@meta.data <- amnion_seurat_object@meta.data %>%
+  mutate(
+    layer_and_timepoint = paste(layer, timepoint_plus, sep = "_"),
+    layer_and_gestation = paste(layer, gestational_timepoint_plus, sep = "_")
+  )
+
+amnion_seurat_object@meta.data <- amnion_seurat_object@meta.data %>%
+  mutate(
+    cell_type = paste(scType_Pique,origin, sep = "_"))
+
+
+metadata <- amnion_seurat_object@meta.data
+
+print(unique(metadata$layer_and_timepoint))
+```
+
+```{r}
+
+amnion_safe <- DietSeurat(
+  object = amnion_seurat_object,
+  assays = DefaultAssay(amnion_seurat_object),  # keep counts/data
+  dimreducs = NULL,   # remove all PCA/UMAP/other reductions
+  graphs = NULL,      # remove SNN/NN graphs
+  features = rownames(amnion_seurat_object)
+)
+
+# Optional: reset active identities
+Idents(amnion_safe) <- NULL
+
+saveRDS(amnion_safe, file = "amnion_seurat_object.rds")
+```
+
+
+#End
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
