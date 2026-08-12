@@ -1,5 +1,5 @@
 ---
-title: "scRNA of in vitro human skeletal stem cells"
+title: "Analysis of Fetal Membrane at Midterm and Term, Cell Type Assignment"
 author: "Lukas Moser"
 date: today
 date-format: long
@@ -90,8 +90,13 @@ ggplot(seurat_object@meta.data, aes(x = doublet_scores)) +
   xlab('doublet_score') +
   ylab('Frequency')
 
-# Filter cells with percent.mt > 0.5 or doublet_score > 0.5
-filtered_seurat_object <- subset(seurat_object, subset = percent.mt <= 1 & doublet_class <= "singlet")
+# Filter cells doublet class not Nan
+filtered_seurat_object <- subset(seurat_object, subset = doublet_class <= "singlet")
+
+#What it actually does in a clearer way, maybe change if you rerun the code to that
+#keep <- !is.na(seurat_object$doublet_class)
+#filtered_seurat_object <- subset(seurat_object, cells = colnames(seurat_object)[keep])
+
 
 # Calculate the number of cells removed
 num_cells_removed <- ncol(seurat_object) - ncol(filtered_seurat_object)
