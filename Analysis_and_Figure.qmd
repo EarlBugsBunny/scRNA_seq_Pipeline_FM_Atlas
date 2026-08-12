@@ -1,5 +1,5 @@
 ---
-title: "scRNA of in vitro human skeletal stem cells"
+title: "Analysis of Fetal Membrane at Midterm and Term, Figures"
 author: "Lukas Moser"
 date: today
 date-format: long
@@ -29,7 +29,7 @@ library("here")
 library("writexl")
 library("jsonlite")
 library("tidyverse")
-amnion_seurat_object <- readRDS("processed_amnion_seurat_object.rds")
+amnion_seurat_object <- readRDS("amnion_seurat_object.rds")
 ```
 
 
@@ -108,8 +108,9 @@ meta <- amnion_seurat_object@meta.data
 p <- DimPlot(amnion_seurat_object, reduction = "umap", group.by = "Cell Type")
 ggsave(filename = "Figure1/UMAP_cell_type.png", plot = p, width = 6, height = 5, dpi = 300)
 print(p)
-`````
-````{r}
+```
+
+```{r}
 s <- FeaturePlot(amnion_seurat_object, "PIEZO1")
 ggsave(filename = "Piezo1_Featureplot.png", plot = s, width = 6, height = 5, dpi = 300)
 print(s)
@@ -126,8 +127,8 @@ library(ggplot2)
 # 1. CONSOLIDATE MOTHER/FETUS ORIGINS FROM THE CLEANED "Cell Type"
 # ---------------------------------------------------------
 
-# Create the Broad column using your already-cleaned "Cell Type" column as the source
-amnion_seurat_object[["Broad_Cell_Type"]] <- amnion_seurat_object[["Cell Type"]] %>%
+# Use @meta.data to safely extract the column as a true atomic vector
+amnion_seurat_object[["Broad_Cell_Type"]] <- amnion_seurat_object@meta.data[["Cell Type"]] %>%
   # Remove the words "Mother" or "Fetus"
   str_remove_all("Mother|Fetus") %>%
   # Clean up any trailing spaces or hyphens left over
@@ -242,7 +243,8 @@ amnion_seurat_object[["Cell Origin"]] <- amnion_seurat_object$origin
 p <- DimPlot(amnion_seurat_object, reduction = "umap", group.by = "Cell Origin", shuffle = TRUE)
 ggsave(filename = "Figure1/UMAP_mother_fetus.png", plot = p, width = 6, height = 5, dpi = 300)
 print(p)
-`````
+```
+
 #### UMAP Timepoints
 
 ```{r}
@@ -252,14 +254,16 @@ amnion_seurat_object[["Gestational Age"]] <- amnion_seurat_object$timepoint %>%
 p <- DimPlot(amnion_seurat_object, reduction = "umap", group.by = "Gestational Age", shuffle = TRUE)
 ggsave(filename = "Figure1/timepoint.png", plot = p, width = 6, height = 5, dpi = 300)
 print(p)
-`````
+```
+
 #### UMAP Tissue Amnion / Chorion
 ```{r}
 amnion_seurat_object[["Tissue Layer"]] <- amnion_seurat_object$layer
 p <- DimPlot(amnion_seurat_object, reduction = "umap", group.by = "Tissue Layer", shuffle = TRUE)
 ggsave(filename = "Figure1/amnion_choriont.png", plot = p, width = 6, height = 5, dpi = 300)
 print(p)
-`````
+```
+
 
 #### UMAP Location:
 ```{r}
@@ -268,7 +272,8 @@ amnion_seurat_object[["Location"]] <- amnion_seurat_object$tissue_source
 p <- DimPlot(amnion_seurat_object, reduction = "umap", group.by = "Location", shuffle = TRUE)
 ggsave(filename = "Figure1/tissue_location.png", plot = p, width = 6, height = 5, dpi = 300)
 print(p)
-`````
+```
+
 ```{r}
 metadata <- amnion_seurat_object@meta.data
 saveRDS(amnion_seurat_object, file = "seurat_object_midterm_term_fetalmembrane.rds")
@@ -501,49 +506,67 @@ p <- ggplot(plot_df, aes(y = CellType, x = avg_log2FC, color = p_val_adj)) +
 # Save the upright plot
 ggsave("Figure2/scattered_dotplot_significant_labeled_upright.png",
        plot = p, width = 8, height = 12, dpi = 300)
-
+ggsave("Figure2/scattered_dotplot_significant_labeled_upright.svg",
+       plot = p, width = 8, height = 12, dpi = 300)
 ```
 
-### Change in Proportion of Celltypes (decrease or increase of cells)
 ```{r}
-library(Seurat)
-library(speckle)
+library(ggplot2)
+library(ggrepel)
 library(dplyr)
+library(stringr)
 
+# List of genes to label
+genes_to_label <- c("PAPPA", "PAPPA2", "NOTUM", "HPGD", "ZEB1", "TFAP2A", 
+                    "TCF7L1", "TCF7L2", "WNT5A", "VTCN1", "LAMB1", "COL5A2", 
+                    "COL12A1", "TGFBI", "MMP2", "MRC1", "CD163", "IGFBP3", 
+                    "COL4A1", "COL4A2", "COL4A3", "COL4A5", "COL4A6", "COL4A7")
 
-propeller_results <- propeller(clusters = amnion_seurat_object_nocon$cell_type, sample = amnion_seurat_object_nocon$samples,group = amnion_seurat_object_nocon$layer_and_gestation2)
-
-
-```
-
-```{r}
-library(limma)
-
-# Make a design matrix
-group <- factor(amnion_seurat_object_nocon$layer_and_gestation2)
-design <- model.matrix(~0 + group)
-colnames(design) <- levels(group)
-
-# Run propeller using linear model
-propeller_results_lm <- propeller.lm(
-  clusters = amnion_seurat_object_nocon$cell_type,
-  sample = amnion_seurat_object_nocon$samples,
-  group = group,
-  design = design
+# Desired order (make sure names match your cleaned CellType values)
+desired_order <- c(
+  "Endometrial Mother", "Decidual Mother", "Fibroblast Mother", "LED Mother",
+  "Macrophage Mother", "T-Cell-Resting Mother","HSC Mother", "EVT Fetus", "CTB Fetus", "Stromal Fetus","Epithelial Fetus"
 )
 
-# Then extract contrasts like Chorion.Term - Chorion.Midterm
-contrast_matrix <- makeContrasts(
-  Chorion.Term - Chorion.Midterm,
-  levels = design
-)
+desired_order <- rev(desired_order)
 
-fit <- contrasts.fit(propeller_results_lm$prop.mat, contrast_matrix)
-fit <- eBayes(fit)
-topTable(fit)
+plot_df <- de_df %>%
+  filter(p_val_adj < 0.05)
 
+plot_df <- plot_df %>%
+  mutate(CellType = CellType %>%
+           str_replace_all("_", " ") %>%
+           str_replace_all("[0-9]", "") %>%
+           str_replace_all("-(Mother|Fetus)", " \\1") %>%
+           str_replace_all("Macrophage- Mother", "Macrophage Mother") %>%
+           str_replace_all("Macrophage- Fetus", "Macrophage Fetus"))
 
+plot_df$CellType <- factor(plot_df$CellType, levels = desired_order)
+
+p <- ggplot(plot_df, aes(y = CellType, x = avg_log2FC, color = p_val_adj)) +
+  scale_y_discrete(limits = desired_order) +
+  geom_point(size = 3, position = position_jitter(height = 0.3, width = 0)) +
+  geom_text_repel(
+    data = subset(plot_df, Gene %in% genes_to_label),
+    aes(label = Gene),
+    size = 4,
+    nudge_x = 0.5,         
+    segment.size = 0.5,
+    segment.color = "grey50",
+    box.padding = 0.5,
+    point.padding = 0.5
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.y = element_text(size = 12)) +
+  labs(y = "Cell Type", x = "Log2 Fold Change", color = "Adjusted p-value")
+
+# Save the upright plot
+ggsave("Figure2/scattered_dotplot_significant_labeled_upright_nospace.png",
+       plot = p, width = 8, height = 12, dpi = 300)
+ggsave("Figure2/scattered_dotplot_significant_labeled_upright_nospace.svg",
+       plot = p, width = 8, height = 12, dpi = 300)
 ```
+
 
 #### Ratio cell types (removed contanminated Donor 1003)
 
@@ -917,62 +940,36 @@ ggsave("Figure2/Fetus_plot.png",  p_fetus,  width=5, height=12, dpi=300)
 ```
 
 
-### Check for Significance in a smart way (amnion always all agaisnt all)
+### Check for Significance in the Cell Proporotions
 
 ```{r}
-library(Seurat) 
-library(speckle) 
-library(dplyr) 
+library(speckle)
+set.seed(123)
 
+run_prop <- function(meta, keep, label) {
+  m <- meta %>% dplyr::filter(layer_and_gestation2 %in% keep)
+  res <- propeller(clusters  = m$cell_type,
+                   sample    = m$samples,
+                   group     = droplevels(factor(m$layer_and_gestation2)),
+                   transform = "logit")
+  res$cell_type  <- rownames(res)
+  res$comparison <- label
+  write.csv(res, file.path("Figure2", paste0("propeller_", label, ".csv")), row.names = FALSE)
+  res
+}
 
-propeller_results <- propeller(clusters = amnion_seurat_object_nocon$cell_type, sample = amnion_seurat_object_nocon$samples,group = amnion_seurat_object_nocon$layer_and_gestation2)
+meta <- amnion_seurat_object_nocon@meta.data
 
+prop_omnibus       <- propeller(clusters = meta$cell_type, sample = meta$samples,
+                                group = meta$layer_and_gestation2, transform = "logit")
+prop_amnion_gest   <- run_prop(meta, c("Amnion Midterm",  "Amnion Term"),           "amnion_term_vs_mid")
+prop_chorion_gest  <- run_prop(meta, c("Chorion Midterm", "Chorion Term"),          "chorion_term_vs_mid")
+prop_amnion_place  <- run_prop(meta, c("Amnion Term",     "Amnion Term Placenta"),  "amnion_placenta_vs_periph")
+prop_chorion_place <- run_prop(meta, c("Chorion Term",    "Chorion Term Placenta"), "chorion_placenta_vs_periph")
+
+prop_amnion_gest[order(prop_amnion_gest$FDR), ]
+prop_chorion_gest[order(prop_chorion_gest$FDR), ]
 ```
-```{r}
-# Subset the metadata
-meta_subset <- amnion_seurat_object_nocon@meta.data %>%
-  filter(layer_and_gestation2 %in% c("Amnion Term", "Amnion Term Placenta"))
-
-propeller_results <- propeller(
-  clusters = meta_subset$cell_type,
-  sample = meta_subset$samples,
-  group = meta_subset$layer_and_gestation2
-)
-```
-```{r}
-# Subset the metadata
-meta_subset <- amnion_seurat_object_nocon@meta.data %>%
-  filter(layer_and_gestation2 %in% c("Chorion Term", "Chorion Term Placenta"))
-
-propeller_results <- propeller(
-  clusters = meta_subset$cell_type,
-  sample = meta_subset$samples,
-  group = meta_subset$layer_and_gestation2
-)
-```
-```{r}
-# Subset the metadata
-meta_subset <- amnion_seurat_object_nocon@meta.data %>%
-  filter(layer_and_gestation2 %in% c("Amnion Term", "Amnion Midterm"))
-
-propeller_results <- propeller(
-  clusters = meta_subset$cell_type,
-  sample = meta_subset$samples,
-  group = meta_subset$layer_and_gestation2
-)
-```
-```{r}
-# Subset the metadata
-meta_subset <- amnion_seurat_object_nocon@meta.data %>%
-  filter(layer_and_gestation2 %in% c("Chorion Term", "Chorion Midterm"))
-
-propeller_results <- propeller(
-  clusters = meta_subset$cell_type,
-  sample = meta_subset$samples,
-  group = meta_subset$layer_and_gestation2
-)
-```
-
 
 
 
@@ -8273,7 +8270,7 @@ p_filtered <- ggplot(df_plot_filtered, aes(
   scale_color_gradient(low = "red", high = "blue", trans = "log10") +
   theme_bw() +
   theme(
-    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
     axis.title.x = element_blank(),
     axis.title.y = element_blank()
   ) +
@@ -9434,6 +9431,95 @@ if (length(all_stress_stats) > 0) {
 }
 ```
 
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(rstatix)
+library(msigdbr)
+library(stringr)
+
+# 1. Setup Folder Structure
+si_dir <- "SI_Figure_Stress_Mother"
+if (!dir.exists(si_dir)) dir.create(si_dir)
+
+# 2. Setup: Define the Stress GO terms
+all_human_genesets <- msigdbr(species = "Homo sapiens")
+stress_terms <- c(
+  "GOBP_CELLULAR_RESPONSE_TO_STRESS", 
+  "GOBP_RESPONSE_TO_STRESS", 
+  "GOBP_ACUTE_PHASE_RESPONSE"
+)
+
+# MODIFIED: Subset for Gestational Age AND Mother origin
+seurat_subset <- subset(amnion_seurat_object, subset = `Gestational Age` %in% c("Week 25", "Week 38") & origin == "Mother")
+
+all_stress_stats <- list()
+
+message("Starting maternal stress analysis. Figures and stats saved to: ", si_dir)
+
+# 3. Loop through terms
+for (term in stress_terms) {
+  
+  term_genes_raw <- all_human_genesets %>%
+    filter(gs_name == term) %>%
+    pull(gene_symbol) %>%
+    unique()
+  
+  valid_genes <- intersect(term_genes_raw, rownames(seurat_subset))
+  
+  if (length(valid_genes) < 5) {
+    message("Skipping ", term, ": Insufficient gene coverage.")
+    next
+  }
+  
+  # Add module score
+  seurat_subset <- AddModuleScore(seurat_subset, features = list(valid_genes), name = "Stress_Mod_")
+  
+  # Fetch data
+  plot_data <- FetchData(seurat_subset, vars = c("Stress_Mod_1", "Gestational Age", "Donor_Nr"))
+  colnames(plot_data) <- c("Score", "Timepoint", "Donor_Nr")
+  
+  # A. Plotting
+  p <- ggplot(plot_data, aes(x = Timepoint, y = Score, fill = Timepoint)) +
+    geom_violin(scale = "width", alpha = 0.7) +
+    geom_boxplot(width = 0.1, outlier.shape = NA) +
+    scale_fill_manual(values = c("Week 25" = "#56B4E9", "Week 38" = "#E69F00")) +
+    labs(
+      title = paste("Maternal Stress:", str_replace_all(term, "_", " ")),
+      subtitle = paste("Based on", length(valid_genes), "detected genes"),
+      y = "Aggregate Stress Score", 
+      x = "Gestational Age"
+    ) +
+    theme_minimal()
+  
+  # Save Plot
+  safe_name <- str_remove(term, "GOBP_")
+  ggsave(file.path(si_dir, paste0(safe_name, "_mother_plot.png")), plot = p, width = 6, height = 5)
+  
+  # B. Statistics (Pseudobulk)
+  stats <- plot_data %>% 
+    group_by(Donor_Nr, Timepoint) %>% 
+    summarise(mean_score = mean(Score, na.rm = TRUE), .groups = "drop") %>%
+    t_test(mean_score ~ Timepoint)
+  
+  stats$term <- term
+  all_stress_stats[[term]] <- stats
+  
+  # Cleanup
+  seurat_subset$Stress_Mod_1 <- NULL
+}
+
+# 4. Final Summary Export
+if (length(all_stress_stats) > 0) {
+  results_df <- bind_rows(all_stress_stats) %>% adjust_pvalue(method = "BH")
+  write.csv(results_df, file.path(si_dir, "Maternal_Stress_Pathway_Stats.csv"), row.names = FALSE)
+  message("Success! Analysis complete. Files saved in: ", si_dir)
+}
+
+```
+
 #### GO term for telomer maintenanca
 
 ```{r}
@@ -9913,12 +9999,109 @@ for (ct in cell_types) {
   dbs <- c("GO_BP", "KEGG", "Hallmark", "Reactome")
   
   for (db in dbs) {
-    save_enrichment_plot(up_genes, db, ct, "Up_Wk38", ct_dir)
-    save_enrichment_plot(down_genes, db, ct, "Up_Wk25", ct_dir)
+    save_enrichment_plot(up_genes, db, ct, "Up Week 38", ct_dir)
+    save_enrichment_plot(down_genes, db, ct, "Up Week 25", ct_dir)
   }
 }
 
 ```
+
+
+```{r}
+library(Seurat)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(msigdbr)
+library(enrichplot)
+library(dplyr)
+library(ggplot2)
+
+# 1. Setup & Directory Creation
+main_dir <- "SI_Figure_Enrichment"
+if (!dir.exists(main_dir)) dir.create(main_dir)
+
+# Pre-load Databases
+# Pre-load Databases and clean up names
+hallmark_db <- msigdbr(species = "Homo sapiens", category = "H") %>% 
+  dplyr::select(gs_name, gene_symbol) %>%
+  dplyr::mutate(
+    gs_name = gsub("^HALLMARK_", "", gs_name),  # Remove HALLMARK_ prefix
+    gs_name = gsub("_", " ", gs_name)           # Replace underscores with spaces
+  )
+
+reactome_db <- msigdbr(species = "Homo sapiens", category = "C2", subcategory = "CP:REACTOME") %>% 
+  dplyr::select(gs_name, gene_symbol) %>%
+  dplyr::mutate(
+    gs_name = gsub("^REACTOME_", "", gs_name),  # Remove REACTOME_ prefix
+    gs_name = gsub("_", " ", gs_name)           # Replace underscores with spaces
+  )
+
+save_enrichment_plot <- function(gene_list, db_type, cell_type, direction, base_path) {
+  if (length(gene_list) < 5) return(NULL)
+  
+  enrich_res <- NULL
+  
+  # UPDATE HERE: Added \n to force a line break before the cell type
+  title <- paste0(db_type, " ", direction, "\n", cell_type)
+  
+  # Logic based on database type
+  if (db_type == "GO_BP") {
+    enrich_res <- enrichGO(gene = gene_list, OrgDb = org.Hs.eg.db, ont = "BP", pAdjustMethod = "BH", qvalueCutoff = 0.05)
+  } else if (db_type == "KEGG") {
+    ids <- bitr(gene_list, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+    enrich_res <- enrichKEGG(gene = ids$ENTREZID, organism = 'hsa', pAdjustMethod = "BH", qvalueCutoff = 0.05)
+  } else if (db_type %in% c("Hallmark", "Reactome")) {
+    term2gene <- if(db_type == "Hallmark") hallmark_db else reactome_db
+    enrich_res <- enricher(gene = gene_list, TERM2GENE = term2gene, pAdjustMethod = "BH", qvalueCutoff = 0.05)
+  }
+  
+  # Save Plot
+  if (!is.null(enrich_res) && nrow(enrich_res@result %>% filter(p.adjust < 0.05)) > 0) {
+    p <- dotplot(enrich_res, showCategory = 10) + 
+         ggtitle(title) + 
+         theme(plot.title = element_text(hjust = 0.5)) # Optional: centers the 2-line title
+         
+    file_name <- file.path(base_path, paste0(db_type, "_", direction, ".png"))
+    ggsave(file_name, p, width = 6, height = 6)
+  }
+}
+
+# 3. Main Loop
+Idents(amnion_seurat_object) <- "Cell Type"
+cell_types <- unique(Idents(amnion_seurat_object))
+
+for (ct in cell_types) {
+  message("Processing Cell Type: ", ct)
+  
+  # Create directory for this cell type
+  ct_dir <- file.path(main_dir, gsub(" ", "_", ct))
+  if (!dir.exists(ct_dir)) dir.create(ct_dir)
+  
+  # A. Differential Expression
+  de_markers <- FindMarkers(
+    object = amnion_seurat_object, 
+    subset.ident = ct, 
+    group.by = "Gestational Age", 
+    ident.1 = "Week 38", 
+    ident.2 = "Week 25"
+  )
+  
+  up_genes <- rownames(de_markers[de_markers$p_val_adj < 0.05 & de_markers$avg_log2FC > 0, ])
+  down_genes <- rownames(de_markers[de_markers$p_val_adj < 0.05 & de_markers$avg_log2FC < 0, ])
+  
+  # B. Run all Enrichments
+  dbs <- c("GO_BP", "KEGG", "Hallmark", "Reactome")
+  
+  for (db in dbs) {
+    save_enrichment_plot(up_genes, db, ct, "Up Week 38", ct_dir)
+    save_enrichment_plot(down_genes, db, ct, "Up Week 25", ct_dir)
+  }
+}
+
+```
+
+
+
 ### Heatmap Differential Expression Genes Cell type (top 10)
 
 ```{r}
@@ -10104,7 +10287,67 @@ ggplot(ratio_df, aes(x = Cell_Type, y = Male_ratio, fill = color_group)) +
 
 ### Cell type confimration
 
+```{r}
+library(Seurat)
+library(ggplot2)
 
+# 1. Define the output directory
+output_dir <- "SI_Figure_Celltypeconfirmation"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+# 2. Define the strictly literature-validated genes from Pique-Regi et al. 2019
+literature_markers <- c(
+  # Trophoblast & Epithelial
+  "HLA-G", "ITGA5",              # EVT
+  "EGFR", "PAGE4",               # CTB
+  "KRT7", "EPCAM",               # Epithelial
+  
+  # Decidual & Endometrial
+  "PRL", "IGFBP1",               # Decidual
+  "PAEP", "MMP11",               # Endometrial
+  
+  # Stromal / Fibroblast
+  "DCN", "COL1A1", "VIM",        # Fibroblasts & Stromal
+  
+  # Endothelial & Stem
+  "PDPN", "TIE1", "CDH5",        # LED (Lymphatic Endothelial Decidual)
+  "CD34", "PTPRC",               # HSC 
+  
+  # Immune
+  "CD163", "CD68", "AIF1",       # Macrophages
+  "NKG7", "GNLY", "NCAM1",       # NK Cells
+  "CD3D", "CD3E"                 # T-Cells
+)
+
+# 3. Filter genes present in your specific matrix
+genes_to_plot <- intersect(unique(literature_markers), rownames(amnion_seurat_object))
+
+# 4. Set active identity to your cell type column
+# Ensure "cell_type" matches the exact name of your metadata column containing the 14 cell types
+Idents(amnion_seurat_object) <- "cell_type" 
+
+# 5. Generate the DotPlot
+p_marker_proof <- DotPlot(amnion_seurat_object, 
+                          features = genes_to_plot, 
+                          cluster.idents = TRUE) + 
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, face = "italic", color = "black"),
+        axis.text.y = element_text(color = "black"),
+        panel.border = element_rect(colour = "black", fill = NA, size = 1)) +
+  labs(x = "Pique-Regi et al. Canonical Marker Genes", 
+       y = "Annotated Cell Types", 
+       title = "Validation of Cell Type Annotations") +
+  scale_color_gradientn(colors = c("lightgrey", "#4C72B0", "#002255"))
+
+# 6. Save directly into the new directory
+output_filepath <- file.path(output_dir, "Supplementary_Figure_Marker_Validation.png")
+ggsave(filename = output_filepath, plot = p_marker_proof, width = 12, height = 8, dpi = 300)
+
+print(paste("Plot successfully saved to:", output_filepath))
+
+```
 ```{r}
 library(Seurat)
 library(dplyr)
@@ -10158,7 +10401,6 @@ ggsave(filename = output_path, plot = p_heatmap, width = 12, height = 16, dpi = 
 print(paste("Heatmap saved to:", output_path))
 
 ```
-
 ```{r}
 library(Seurat)
 library(dplyr)
@@ -10226,10 +10468,85 @@ ggsave(filename = output_path, plot = p_heatmap, width = 12, height = 18, dpi = 
 print(paste("Perfect top-left to bottom-right heatmap saved to:", output_path))
 ```
 
-
+### Autolabeles Pique-Regi + Epithelial Cells
 
 
 
 
 #End
 
+```{r}
+library(Seurat)
+library(ggplot2)
+
+# Define typical epithelial markers (~15)
+epithelial_markers <- c(
+  "EPCAM", "KRT18", "KRT8", "CDH1", "KRT19",
+  "KRT7", "CLDN4", "CLDN7", "MUC1", "TJP1",
+  "KRT14", "KRT5", "DSC2", "DSG2", "OCLN"
+)
+
+# Loop through markers and generate FeaturePlots individually
+for (marker in epithelial_markers) {
+  if (marker %in% rownames(amnion_seurat_object)) {
+    p <- FeaturePlot(amnion_seurat_object, features = marker) +
+      ggtitle(marker)
+    print(p)  # each plot is printed individually
+  } else {
+    message(paste("Marker", marker, "not found in Seurat object"))
+  }
+}
+```
+```{r}
+library(Seurat)
+library(ggplot2)
+
+# Define typical stromal/fibroblast markers (~15)
+stromal_markers <- c(
+  "VIM", "COL1A1", "COL1A2", "COL3A1", "DCN",
+  "LUM", "FAP", "PDGFRA", "PDGFRB", "THY1",
+  "ACTA2", "TAGLN", "S100A4", "FN1", "POSTN"
+)
+
+# Loop through markers and generate FeaturePlots individually
+for (marker in stromal_markers) {
+  if (marker %in% rownames(amnion_seurat_object)) {
+    p <- FeaturePlot(amnion_seurat_object, features = marker) +
+      ggtitle(marker)
+    print(p)  # each plot is printed individually
+  } else {
+    message(paste("Marker", marker, "not found in Seurat object"))
+  }
+}
+
+```
+
+#Package Versions
+```{r}
+# List of packages
+packages <- c(
+  "openxlsx", "Seurat", "ggplot2", "cowplot", "dplyr", "limma", "clustree",
+  "viridis", "glue", "knitr", "BiocParallel", "here", "writexl", "jsonlite",
+  "tidyverse", "ggrepel", "stringr", "speckle", "RColorBrewer", "rstatix",
+  "SingleCellExperiment", "nichenetr", "multinichenetr", "circlize",
+  "clusterProfiler", "org.Hs.eg.db", "monocle3", "SeuratWrappers",
+  "msigdbr", "Matrix", "DESeq2", "tibble", "purrr", "pheatmap", "cellXY"
+)
+
+# Remove duplicates
+packages <- unique(packages)
+
+# Get versions and create formatted strings
+pkg_versions <- sapply(packages, function(pkg) {
+  if(requireNamespace(pkg, quietly = TRUE)) {
+    sprintf("%s (v%s)", pkg, as.character(packageVersion(pkg)))
+  } else {
+    sprintf("%s (not installed)", pkg)
+  }
+})
+
+# Print all on a single line, separated by commas
+cat(paste(pkg_versions, collapse = ", "))
+
+
+```
